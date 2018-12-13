@@ -15,8 +15,8 @@ type WatcherManager interface {
 }
 
 type ConcreteWatcherManager struct {
-	config         *cfclient.Config
-	watchers       map[string]*events.AppWatcher
+	config   *cfclient.Config
+	watchers map[string]*events.AppWatcher
 }
 
 func NewWatcherManager(config *cfclient.Config) WatcherManager {

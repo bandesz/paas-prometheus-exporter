@@ -7,11 +7,11 @@ import (
 )
 
 type ExporterCFClient struct {
-	cf	*cfclient.Client
+	cf *cfclient.Client
 }
 
 func NewCFClient(cf *cfclient.Client) CFClient {
-	return &ExporterCFClient {
+	return &ExporterCFClient{
 		cf: cf,
 	}
 }

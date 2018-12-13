@@ -48,9 +48,9 @@ func (e *PaasExporter) createNewWatcher(app cfclient.App) error {
 	e.cfNamesByGuid[app.Guid] = newCfNames(app)
 	err := e.watcherManager.AddWatcher(app, prometheus.WrapRegistererWith(
 		prometheus.Labels{
-			"guid": app.Guid,
-			"app": app.Name,
-			"space": app.SpaceData.Entity.Name,
+			"guid":         app.Guid,
+			"app":          app.Name,
+			"space":        app.SpaceData.Entity.Name,
 			"organisation": app.SpaceData.Entity.OrgData.Entity.Name,
 		},
 		prometheus.DefaultRegisterer,

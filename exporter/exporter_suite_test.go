@@ -1,8 +1,8 @@
 package exporter_test
 
 import (
-	"testing"
 	"log"
+	"testing"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
