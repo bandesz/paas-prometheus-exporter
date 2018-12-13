@@ -1,10 +1,10 @@
 package exporter
 
 import (
-  "github.com/alphagov/paas-prometheus-exporter/events"
-  "github.com/cloudfoundry-community/go-cfclient"
+	"github.com/alphagov/paas-prometheus-exporter/events"
+	"github.com/cloudfoundry-community/go-cfclient"
 
-  "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 //go:generate counterfeiter -o mocks/watcher_manager.go . WatcherManager
@@ -34,6 +34,8 @@ func (wm *ConcreteWatcherManager) AddWatcher(app cfclient.App, registry promethe
 	if err != nil {
 		return err
 	}
+
+	go aw.Run()
 
 	wm.watchers[app.Guid] = aw
 	return nil

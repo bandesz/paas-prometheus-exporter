@@ -157,7 +157,6 @@ func NewAppWatcher(
 		return appWatcher, err
 	}
 
-	go appWatcher.Run()
 	return appWatcher, nil
 }
 
