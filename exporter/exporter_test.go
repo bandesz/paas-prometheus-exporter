@@ -1,6 +1,7 @@
 package exporter_test
 
 import (
+	"context"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -16,10 +17,17 @@ var _ = Describe("CheckForNewApps", func() {
 
 	var fakeClient *mocks.FakeCFClient
 	var fakeWatcherManager *mocks.FakeWatcherManager
+	var ctx context.Context
+	var cancel context.CancelFunc
 
 	BeforeEach(func() {
 		fakeClient = &mocks.FakeCFClient{}
 		fakeWatcherManager = &mocks.FakeWatcherManager{}
+		ctx, cancel = context.WithCancel(context.Background())
+	})
+
+	AfterEach(func() {
+		cancel()
 	})
 
 	It("creates a new app", func() {
@@ -29,7 +37,7 @@ var _ = Describe("CheckForNewApps", func() {
 
 		e := exporter.New(fakeClient, fakeWatcherManager)
 
-		go e.Start(100 * time.Millisecond)
+		go e.Start(ctx, 100*time.Millisecond)
 
 		// Assert addWatcher is called once and only once for example not in subsequent runs of `checkForNewApps`
 		Eventually(fakeWatcherManager.AddWatcherCallCount).Should(Equal(1))
@@ -43,7 +51,7 @@ var _ = Describe("CheckForNewApps", func() {
 
 		e := exporter.New(fakeClient, fakeWatcherManager)
 
-		go e.Start(100 * time.Millisecond)
+		go e.Start(ctx, 100*time.Millisecond)
 
 		// Assert addWatcher is not called including in subsequent runs of `checkForNewApps`
 		Consistently(fakeWatcherManager.AddWatcherCallCount, 200 * time.Millisecond).Should(Equal(0))
@@ -59,7 +67,7 @@ var _ = Describe("CheckForNewApps", func() {
 
 		e := exporter.New(fakeClient, fakeWatcherManager)
 
-		go e.Start(100 * time.Millisecond)
+		go e.Start(ctx, 100*time.Millisecond)
 
 		// Assert addWatcher is called once and only once for example not in subsequent runs of `checkForNewApps`
 		Eventually(fakeWatcherManager.AddWatcherCallCount).Should(Equal(1))
@@ -74,7 +82,7 @@ var _ = Describe("CheckForNewApps", func() {
 
 		e := exporter.New(fakeClient, fakeWatcherManager)
 
-		go e.Start(100 * time.Millisecond)
+		go e.Start(ctx, 100*time.Millisecond)
 
 		// Assert addWatcher is called once and only once for example not in subsequent runs of `checkForNewApps`
 		Eventually(fakeWatcherManager.AddWatcherCallCount).Should(Equal(1))
@@ -198,7 +206,7 @@ var _ = Describe("CheckForNewApps", func() {
 
 		e := exporter.New(fakeClient, fakeWatcherManager)
 
-		go e.Start(100 * time.Millisecond)
+		go e.Start(ctx, 100*time.Millisecond)
 
 		// Assert addWatcher is called twice and only twice for example not in subsequent runs of `checkForNewApps`
 		Eventually(fakeWatcherManager.AddWatcherCallCount).Should(Equal(2))
@@ -219,7 +227,7 @@ var _ = Describe("CheckForNewApps", func() {
 
 		e := exporter.New(fakeClient, fakeWatcherManager)
 
-		go e.Start(100 * time.Millisecond)
+		go e.Start(ctx, 100*time.Millisecond)
 
 		Eventually(fakeWatcherManager.UpdateAppInstancesCallCount).Should(Equal(1))
 

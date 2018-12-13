@@ -1,6 +1,7 @@
 package exporter
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -107,14 +108,20 @@ func (e *PaasExporter) checkForNewApps() error {
 	return nil
 }
 
-func (e *PaasExporter) Start(updateFrequency time.Duration) {
-	for {
-		log.Println("checking for new apps")
-		err := e.checkForNewApps()
-		if err != nil {
-			log.Fatal(err)
-		}
+func (e *PaasExporter) Start(ctx context.Context, updateFrequency time.Duration) {
+	timer := time.NewTicker(updateFrequency)
+	defer timer.Stop()
 
-		time.Sleep(updateFrequency)
+	for {
+		select {
+		case <-timer.C:
+			log.Println("checking for new apps")
+			err := e.checkForNewApps()
+			if err != nil {
+				log.Fatal(err)
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
 }

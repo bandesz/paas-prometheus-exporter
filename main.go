@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/alphagov/paas-prometheus-exporter/exporter"
@@ -25,6 +29,16 @@ var (
 )
 
 func main() {
+	ctx, shutdown := context.WithCancel(context.Background())
+
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		shutdown()
+	}()
+
 	kingpin.Parse()
 
 	config := &cfclient.Config{
@@ -55,7 +69,7 @@ func main() {
 	exporter_cf := exporter.NewCFClient(cf)
 
 	e := exporter.New(exporter_cf, exporter.NewWatcherManager(config))
-	go e.Start(time.Duration(*updateFrequency) * time.Second)
+	go e.Start(ctx, time.Duration(*updateFrequency)*time.Second)
 	http.Handle("/metrics", promhttp.Handler())
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *prometheusBindPort), nil))
 }
