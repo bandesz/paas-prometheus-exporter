@@ -1,4 +1,4 @@
-package events
+package app
 
 import (
 	"bytes"
@@ -7,17 +7,18 @@ import (
 	"log"
 	"time"
 
+	"github.com/alphagov/paas-prometheus-exporter/cf"
 	"github.com/cloudfoundry-community/go-cfclient"
 	sonde_events "github.com/cloudfoundry/sonde-go/events"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-type AppWatcher struct {
+type Watcher struct {
 	appGuid               string
 	MetricsForInstance    []InstanceMetrics
 	numberOfInstancesChan chan int
 	registerer            prometheus.Registerer
-	streamProvider        AppStreamProvider
+	streamProvider        cf.AppStreamProvider
 }
 
 type InstanceMetrics struct {
@@ -119,14 +120,21 @@ func NewInstanceMetrics(instanceIndex int, registerer prometheus.Registerer) (In
 }
 
 func (im *InstanceMetrics) registerInstanceMetrics() {
-	im.Registerer.MustRegister(im.Cpu)
-	im.Registerer.MustRegister(im.Crash)
-	im.Registerer.MustRegister(im.DiskBytes)
-	im.Registerer.MustRegister(im.DiskUtilization)
-	im.Registerer.MustRegister(im.MemoryBytes)
-	im.Registerer.MustRegister(im.MemoryUtilization)
-	im.Registerer.MustRegister(im.Requests)
-	im.Registerer.MustRegister(im.ResponseTime)
+	for _, collector := range []prometheus.Collector{
+		im.Cpu,
+		im.Crash,
+		im.DiskBytes,
+		im.DiskUtilization,
+		im.MemoryBytes,
+		im.MemoryUtilization,
+		im.Requests,
+		im.ResponseTime,
+	} {
+		if err := im.Registerer.Register(collector); err != nil {
+			panic(err)
+		}
+	}
+
 }
 
 func (im *InstanceMetrics) unregisterInstanceMetrics() {
@@ -140,72 +148,82 @@ func (im *InstanceMetrics) unregisterInstanceMetrics() {
 	im.Registerer.Unregister(im.ResponseTime)
 }
 
-func NewAppWatcher(
+func NewWatcher(
 	app cfclient.App,
 	registerer prometheus.Registerer,
-	streamProvider AppStreamProvider,
-) (*AppWatcher, error) {
-	appWatcher := &AppWatcher{
+	streamProvider cf.AppStreamProvider,
+) (*Watcher, error) {
+	appRegisterer := prometheus.WrapRegistererWith(
+		prometheus.Labels{
+			"guid":         app.Guid,
+			"app":          app.Name,
+			"space":        app.SpaceData.Entity.Name,
+			"organisation": app.SpaceData.Entity.OrgData.Entity.Name,
+		},
+		registerer,
+	)
+
+	watcher := &Watcher{
 		appGuid:               app.Guid,
 		MetricsForInstance:    make([]InstanceMetrics, 0),
 		numberOfInstancesChan: make(chan int, 5),
-		registerer:            registerer,
+		registerer:            appRegisterer,
 		streamProvider:        streamProvider,
 	}
-	err := appWatcher.scaleTo(app.Instances)
+	err := watcher.scaleTo(app.Instances)
 	if err != nil {
-		return appWatcher, err
+		return watcher, err
 	}
 
-	return appWatcher, nil
+	return watcher, nil
 }
 
-func (m *AppWatcher) Run() {
-	msgs, errs := m.streamProvider.OpenStreamFor(m.appGuid)
-	defer m.streamProvider.Close()
+func (w *Watcher) Run() {
+	msgs, errs := w.streamProvider.Start()
+	defer w.streamProvider.Close()
 
-	err := m.mainLoop(msgs, errs)
+	err := w.mainLoop(msgs, errs)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func (m *AppWatcher) mainLoop(msgs <-chan *sonde_events.Envelope, errs <-chan error) error {
+func (w *Watcher) mainLoop(msgs <-chan *sonde_events.Envelope, errs <-chan error) error {
 	for {
 		select {
 		case message, ok := <-msgs:
 			if !ok {
-				return fmt.Errorf("AppWatcher messages channel was closed, for guid %s", m.appGuid)
+				return fmt.Errorf("AppWatcher messages channel was closed, for guid %s", w.appGuid)
 			}
 			switch message.GetEventType() {
 			case sonde_events.Envelope_LogMessage:
-				err := m.processLogMessage(message.GetLogMessage())
+				err := w.processLogMessage(message.GetLogMessage())
 				if err != nil {
 					return err
 				}
 			case sonde_events.Envelope_ContainerMetric:
-				m.processContainerMetric(message.GetContainerMetric())
+				w.processContainerMetric(message.GetContainerMetric())
 			case sonde_events.Envelope_HttpStartStop:
-				m.processHttpStartStopMetric(message.GetHttpStartStop())
+				w.processHttpStartStopMetric(message.GetHttpStartStop())
 			}
 		case err, ok := <-errs:
 			if !ok {
-				return fmt.Errorf("AppWatcher errors channel was closed, for guid %s", m.appGuid)
+				return fmt.Errorf("AppWatcher errors channel was closed, for guid %s", w.appGuid)
 			}
 			if err == nil {
 				continue
 			}
 			return err
-		case newNumberOfInstances, ok := <-m.numberOfInstancesChan:
+		case newNumberOfInstances, ok := <-w.numberOfInstancesChan:
 			if !ok {
-				err := m.scaleTo(0)
+				err := w.scaleTo(0)
 				if err != nil {
 					return err
 				}
 				return nil
 			}
 
-			err := m.scaleTo(newNumberOfInstances)
+			err := w.scaleTo(newNumberOfInstances)
 			if err != nil {
 				return err
 			}
@@ -213,10 +231,10 @@ func (m *AppWatcher) mainLoop(msgs <-chan *sonde_events.Envelope, errs <-chan er
 	}
 }
 
-func (m *AppWatcher) processContainerMetric(metric *sonde_events.ContainerMetric) {
+func (w *Watcher) processContainerMetric(metric *sonde_events.ContainerMetric) {
 	index := metric.GetInstanceIndex()
-	if int(index) < len(m.MetricsForInstance) {
-		instance := m.MetricsForInstance[index]
+	if int(index) < len(w.MetricsForInstance) {
+		instance := w.MetricsForInstance[index]
 
 		diskUtilizationPercentage := float64(metric.GetDiskBytes()) / float64(metric.GetDiskBytesQuota()) * 100
 		memoryUtilizationPercentage := float64(metric.GetMemoryBytes()) / float64(metric.GetMemoryBytesQuota()) * 100
@@ -229,7 +247,7 @@ func (m *AppWatcher) processContainerMetric(metric *sonde_events.ContainerMetric
 	}
 }
 
-func (m *AppWatcher) processLogMessage(logMessage *sonde_events.LogMessage) error {
+func (w *Watcher) processLogMessage(logMessage *sonde_events.LogMessage) error {
 	if logMessage.GetSourceType() != "API" || logMessage.GetMessageType() != sonde_events.LogMessage_OUT {
 		return nil
 	}
@@ -261,46 +279,46 @@ func (m *AppWatcher) processLogMessage(logMessage *sonde_events.LogMessage) erro
 	}
 
 	index := logMessagePayload.Index
-	if index < len(m.MetricsForInstance) {
-		m.MetricsForInstance[index].Crash.Inc()
+	if index < len(w.MetricsForInstance) {
+		w.MetricsForInstance[index].Crash.Inc()
 	}
 	return nil
 }
 
-func (m *AppWatcher) processHttpStartStopMetric(httpStartStop *sonde_events.HttpStartStop) {
+func (w *Watcher) processHttpStartStopMetric(httpStartStop *sonde_events.HttpStartStop) {
 	responseDuration := time.Duration(httpStartStop.GetStopTimestamp() - httpStartStop.GetStartTimestamp()).Seconds()
 	index := int(httpStartStop.GetInstanceIndex())
-	if index < len(m.MetricsForInstance) {
+	if index < len(w.MetricsForInstance) {
 		statusRange := fmt.Sprintf("%dxx", *httpStartStop.StatusCode/100)
-		m.MetricsForInstance[index].Requests.WithLabelValues(statusRange).Inc()
-		m.MetricsForInstance[index].ResponseTime.WithLabelValues(statusRange).Observe(responseDuration)
+		w.MetricsForInstance[index].Requests.WithLabelValues(statusRange).Inc()
+		w.MetricsForInstance[index].ResponseTime.WithLabelValues(statusRange).Observe(responseDuration)
 	}
 }
 
-func (m *AppWatcher) UpdateAppInstances(newNumberOfInstances int) {
-	m.numberOfInstancesChan <- newNumberOfInstances
+func (w *Watcher) UpdateAppInstances(newNumberOfInstances int) {
+	w.numberOfInstancesChan <- newNumberOfInstances
 }
 
-func (m *AppWatcher) Close() {
-	close(m.numberOfInstancesChan)
+func (w *Watcher) Close() {
+	close(w.numberOfInstancesChan)
 }
 
-func (m *AppWatcher) scaleTo(newInstanceCount int) error {
-	currentInstanceCount := len(m.MetricsForInstance)
+func (w *Watcher) scaleTo(newInstanceCount int) error {
+	currentInstanceCount := len(w.MetricsForInstance)
 
 	if currentInstanceCount < newInstanceCount {
 		for i := currentInstanceCount; i < newInstanceCount; i++ {
-			im, err := NewInstanceMetrics(i, m.registerer)
+			im, err := NewInstanceMetrics(i, w.registerer)
 			if err != nil {
 				return err
 			}
-			m.MetricsForInstance = append(m.MetricsForInstance, im)
+			w.MetricsForInstance = append(w.MetricsForInstance, im)
 		}
 	} else {
 		for i := currentInstanceCount; i > newInstanceCount; i-- {
-			m.MetricsForInstance[i-1].unregisterInstanceMetrics()
+			w.MetricsForInstance[i-1].unregisterInstanceMetrics()
 		}
-		m.MetricsForInstance = m.MetricsForInstance[0:newInstanceCount]
+		w.MetricsForInstance = w.MetricsForInstance[0:newInstanceCount]
 	}
 	return nil
 }

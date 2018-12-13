@@ -28,6 +28,11 @@ var (
 	prometheusBindPort = kingpin.Flag("prometheus-bind-port", "The port to bind to for prometheus metrics.").Default("8080").OverrideDefaultFromEnvar("PORT").Int()
 )
 
+type ServiceDiscovery interface {
+	Start()
+	Stop()
+}
+
 func main() {
 	ctx, shutdown := context.WithCancel(context.Background())
 

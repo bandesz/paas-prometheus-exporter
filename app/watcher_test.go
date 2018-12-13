@@ -1,4 +1,4 @@
-package events_test
+package app_test
 
 import (
 	"errors"
@@ -6,12 +6,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alphagov/paas-prometheus-exporter/app"
+
+	"github.com/alphagov/paas-prometheus-exporter/cf/mocks"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 
-	"github.com/alphagov/paas-prometheus-exporter/events"
-	"github.com/alphagov/paas-prometheus-exporter/events/mocks"
 	"github.com/cloudfoundry-community/go-cfclient"
 	sonde_events "github.com/cloudfoundry/sonde-go/events"
 	"github.com/prometheus/client_golang/prometheus"
@@ -57,7 +58,7 @@ var _ = Describe("AppWatcher", func() {
 	const METRICS_PER_INSTANCE = 8
 
 	var (
-		appWatcher               *events.AppWatcher
+		appWatcher               *app.Watcher
 		registerer               *FakeRegistry
 		streamProvider           *mocks.FakeAppStreamProvider
 		closeAppWatcherAfterTest bool
@@ -72,9 +73,9 @@ var _ = Describe("AppWatcher", func() {
 		registerer = &FakeRegistry{}
 		streamProvider = &mocks.FakeAppStreamProvider{}
 		sondeEventChan = make(chan *sonde_events.Envelope, 10)
-		streamProvider.OpenStreamForReturns(sondeEventChan, nil)
+		streamProvider.StartReturns(sondeEventChan, nil)
 
-		appWatcher, _ = events.NewAppWatcher(apps[0], registerer, streamProvider)
+		appWatcher, _ = app.NewWatcher(apps[0], registerer, streamProvider)
 		go appWatcher.Run()
 		closeAppWatcherAfterTest = true
 	})
