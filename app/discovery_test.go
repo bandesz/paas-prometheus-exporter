@@ -8,7 +8,6 @@ import (
 
 	"github.com/alphagov/paas-prometheus-exporter/app"
 	"github.com/alphagov/paas-prometheus-exporter/cf/mocks"
-	testmocks "github.com/alphagov/paas-prometheus-exporter/test/mocks"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,8 +15,10 @@ import (
 	"github.com/cloudfoundry-community/go-cfclient"
 )
 
+const guid = "33333333-3333-3333-3333-333333333333"
+
 var appFixture = cfclient.App{
-	Guid:      "33333333-3333-3333-3333-333333333333",
+	Guid:      guid,
 	Instances: 1,
 	Name:      "foo",
 	State:     "STARTED",
@@ -31,25 +32,18 @@ var appFixture = cfclient.App{
 	},
 }
 
-func getMetrics(registerer *testmocks.FakeRegisterer) []prometheus.Metric {
-	metricsChan := make(chan prometheus.Metric, 1000)
-	for i := 0; i < registerer.RegisterCallCount(); i++ {
-		registerer.RegisterArgsForCall(i).Collect(metricsChan)
-	}
-	close(metricsChan)
-	metrics := make([]prometheus.Metric, 0)
-	for metric := range metricsChan {
-		metrics = append(metrics, metric)
+func getMetrics(registry *prometheus.Registry) []*dto.Metric {
+	metrics := make([]*dto.Metric, 0)
+	metricsFamilies, _ := registry.Gather()
+	for _, metricsFamily := range metricsFamilies {
+		metrics = append(metrics, metricsFamily.Metric...)
 	}
 	return metrics
 }
 
-func metricHasLabels(metric prometheus.Metric, labels map[string]string) bool {
-	dtoMetric := &dto.Metric{}
-	metric.Write(dtoMetric)
-
+func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
 	actualLabels := make(map[string]string)
-	for _, pair := range dtoMetric.Label {
+	for _, pair := range metric.Label {
 		actualLabels[*pair.Name] = *pair.Value
 	}
 
@@ -62,36 +56,31 @@ func metricHasLabels(metric prometheus.Metric, labels map[string]string) bool {
 	return true
 }
 
-func eventuallyRegistererWillHaveMetricWithLabels(
-	registerer *testmocks.FakeRegisterer,
-	labels map[string]string,
-) {
-	Eventually(func() bool {
-		for _, metric := range getMetrics(registerer) {
-			if metricHasLabels(metric, labels) {
-				return true
-			}
+func findMetric(registry *prometheus.Registry, labels map[string]string) *dto.Metric {
+	for _, metric := range getMetrics(registry) {
+		if metricHasLabels(metric, labels) {
+			return metric
 		}
+	}
 
-		return false
-	}).Should(BeTrue(), "expected metric with labels: %s", labels)
+	return nil
 }
 
-var _ = Describe("CheckForNewApps", func() {
+var _ = FDescribe("CheckForNewApps", func() {
 
 	var discovery *app.Discovery
 	var fakeClient *mocks.FakeClient
 	var ctx context.Context
 	var cancel context.CancelFunc
-	var fakeRegisterer *testmocks.FakeRegisterer
+	var registry *prometheus.Registry
 	var fakeAppStreamProvider *mocks.FakeAppStreamProvider
 
 	BeforeEach(func() {
 		fakeClient = &mocks.FakeClient{}
 		fakeAppStreamProvider = &mocks.FakeAppStreamProvider{}
 		fakeClient.NewAppStreamProviderReturns(fakeAppStreamProvider)
-		fakeRegisterer = &testmocks.FakeRegisterer{}
-		discovery = app.NewDiscovery(fakeClient, fakeRegisterer, 100*time.Millisecond)
+		registry = prometheus.NewRegistry()
+		discovery = app.NewDiscovery(fakeClient, registry, 100*time.Millisecond)
 		ctx, cancel = context.WithCancel(context.Background())
 	})
 
@@ -111,90 +100,73 @@ var _ = Describe("CheckForNewApps", func() {
 		go discovery.Start(ctx)
 
 		Eventually(fakeClient.NewAppStreamProviderCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider.StartCallCount).Should(Equal(1))
 
-		Consistently(fakeAppStreamProvider.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-
-		Eventually(fakeRegisterer.RegisterCallCount).Should(BeNumerically(">", 0))
-
-		eventuallyRegistererWillHaveMetricWithLabels(fakeRegisterer, map[string]string{
-			"guid": appFixture.Guid,
-		})
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid": guid,
+			})
+		}).ShouldNot(BeNil())
 	})
 
 	It("does not create a new appWatcher if the app state is stopped", func() {
-		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{
-			{Guid: "33333333-3333-3333-3333-333333333333", Instances: 1, Name: "foo", State: "STOPPED"},
-		}, nil)
+		stoppedApp := appFixture
+		stoppedApp.State = "STOPPED"
+		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{stoppedApp}, nil)
 
 		go discovery.Start(ctx)
 
 		Consistently(fakeClient.NewAppStreamProviderCallCount, 200*time.Millisecond).Should(Equal(0))
 
-		Consistently(func() bool {
-			for _, metric := range getMetrics(fakeRegisterer) {
-				if metricHasLabels(metric, map[string]string{
-					"guid": "33333333-3333-3333-3333-333333333333",
-				}) {
-					return true
-				}
-			}
-			return false
-		}, 200*time.Millisecond).Should(BeFalse())
+		Consistently(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid": guid,
+			})
+		}, 200*time.Millisecond).Should(BeNil())
 	})
 
-	FIt("deletes an AppWatcher when an app is deleted", func() {
-		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{
-			{Guid: "33333333-3333-3333-3333-333333333333", Instances: 1, Name: "foo", State: "STARTED"},
-		}, nil)
+	It("deletes an AppWatcher when an app is deleted", func() {
+		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{appFixture}, nil)
 		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{}, nil)
 
 		go discovery.Start(ctx)
 
 		Eventually(fakeClient.NewAppStreamProviderCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider.StartCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider.CloseCallCount).Should(Equal(1))
+		Eventually(func() []*dto.Metric { return getMetrics(registry) }).ShouldNot(BeEmpty())
 
-		Consistently(fakeAppStreamProvider.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider.CloseCallCount, 200*time.Millisecond).Should(Equal(1))
-
-		Eventually(func() bool {
-			for _, metric := range getMetrics(fakeRegisterer) {
-				if metricHasLabels(metric, map[string]string{
-					"guid": "33333333-3333-3333-3333-333333333333",
-				}) {
-					return true
-				}
-			}
-			return false
-		}).Should(BeFalse())
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid": guid,
+			})
+		}).Should(BeNil())
 	})
 
 	It("deletes an AppWatcher when an app is stopped", func() {
-		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{
-			{Guid: "11111111-11111-11111-1111-111-11-1-1-1", Instances: 1, Name: "foo", State: "STARTED"},
-		}, nil)
-		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{
-			{Guid: "11111111-11111-11111-1111-111-11-1-1-1", Instances: 1, Name: "foo", State: "STOPPED"},
-		}, nil)
+		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{appFixture}, nil)
+
+		stoppedApp := appFixture
+		stoppedApp.State = "STOPPED"
+		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{stoppedApp}, nil)
 
 		go discovery.Start(ctx)
 
 		Eventually(fakeClient.NewAppStreamProviderCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider.StartCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider.CloseCallCount).Should(Equal(1))
+		Eventually(func() []*dto.Metric { return getMetrics(registry) }).ShouldNot(BeEmpty())
 
-		Consistently(fakeAppStreamProvider.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider.CloseCallCount, 200*time.Millisecond).Should(Equal(1))
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid": guid,
+			})
+		}).Should(BeNil())
 	})
 
 	It("deletes and recreates an AppWatcher when an app is renamed", func() {
-		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{
-			{Guid: "33333333-3333-3333-3333-333333333333", Instances: 1, Name: "foo", State: "STARTED"},
-		}, nil)
-		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{
-			{Guid: "33333333-3333-3333-3333-333333333333", Instances: 1, Name: "bar", State: "STARTED"},
-		}, nil)
+		app1 := appFixture
+		app1.Name = "foo"
+		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{app1}, nil)
+
+		app2 := appFixture
+		app2.Name = "bar"
+		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{app2}, nil)
 
 		fakeAppStreamProvider1 := &mocks.FakeAppStreamProvider{}
 		fakeClient.NewAppStreamProviderReturnsOnCall(0, fakeAppStreamProvider1)
@@ -204,36 +176,30 @@ var _ = Describe("CheckForNewApps", func() {
 		go discovery.Start(ctx)
 
 		Eventually(fakeClient.NewAppStreamProviderCallCount).Should(Equal(2))
-		Eventually(fakeAppStreamProvider1.StartCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider2.StartCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider1.CloseCallCount).Should(Equal(1))
 
-		Consistently(fakeAppStreamProvider1.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider1.CloseCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider2.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider2.CloseCallCount, 200*time.Millisecond).Should(Equal(0))
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid": guid,
+				"app":  "bar",
+			})
+		}).ShouldNot(BeNil())
+
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid": guid,
+				"app":  "foo",
+			})
+		}).Should(BeNil())
 	})
 
 	It("deletes and recreates an AppWatcher when an app's space is renamed", func() {
-		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{
-			{
-				Guid:      "33333333-3333-3333-3333-333333333333",
-				Instances: 1,
-				Name:      "foo",
-				State:     "STARTED",
-				SpaceData: cfclient.SpaceResource{Entity: cfclient.Space{Name: "spacename"}},
-			},
-		}, nil)
+		app1 := appFixture
+		app1.SpaceData.Entity.Name = "spacename"
+		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{app1}, nil)
 
-		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{
-			{
-				Guid:      "33333333-3333-3333-3333-333333333333",
-				Instances: 1,
-				Name:      "foo",
-				State:     "STARTED",
-				SpaceData: cfclient.SpaceResource{Entity: cfclient.Space{Name: "spacenamenew"}},
-			},
-		}, nil)
+		app2 := appFixture
+		app2.SpaceData.Entity.Name = "spacenamenew"
+		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{app2}, nil)
 
 		fakeAppStreamProvider1 := &mocks.FakeAppStreamProvider{}
 		fakeClient.NewAppStreamProviderReturnsOnCall(0, fakeAppStreamProvider1)
@@ -243,50 +209,30 @@ var _ = Describe("CheckForNewApps", func() {
 		go discovery.Start(ctx)
 
 		Eventually(fakeClient.NewAppStreamProviderCallCount).Should(Equal(2))
-		Eventually(fakeAppStreamProvider1.StartCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider2.StartCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider1.CloseCallCount).Should(Equal(1))
 
-		Consistently(fakeAppStreamProvider1.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider1.CloseCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider2.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider2.CloseCallCount, 200*time.Millisecond).Should(Equal(0))
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid":  guid,
+				"space": "spacenamenew",
+			})
+		}).ShouldNot(BeNil())
+
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid":  guid,
+				"space": "spacename",
+			})
+		}).Should(BeNil())
 	})
 
 	It("deletes and recreates an AppWatcher when an app's org is renamed", func() {
-		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{
-			{
-				Guid:      "33333333-3333-3333-3333-333333333333",
-				Instances: 1,
-				Name:      "foo",
-				State:     "STARTED",
-				SpaceData: cfclient.SpaceResource{
-					Entity: cfclient.Space{
-						Name: "spacename",
-						OrgData: cfclient.OrgResource{
-							Entity: cfclient.Org{Name: "orgname"},
-						},
-					},
-				},
-			},
-		}, nil)
+		app1 := appFixture
+		app1.SpaceData.Entity.OrgData.Entity.Name = "orgname"
+		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{app1}, nil)
 
-		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{
-			{
-				Guid:      "33333333-3333-3333-3333-333333333333",
-				Instances: 1,
-				Name:      "foo",
-				State:     "STARTED",
-				SpaceData: cfclient.SpaceResource{
-					Entity: cfclient.Space{
-						Name: "spacename",
-						OrgData: cfclient.OrgResource{
-							Entity: cfclient.Org{Name: "orgnamenew"},
-						},
-					},
-				},
-			},
-		}, nil)
+		app2 := appFixture
+		app2.SpaceData.Entity.OrgData.Entity.Name = "orgnamenew"
+		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{app2}, nil)
 
 		fakeAppStreamProvider1 := &mocks.FakeAppStreamProvider{}
 		fakeClient.NewAppStreamProviderReturnsOnCall(0, fakeAppStreamProvider1)
@@ -296,32 +242,45 @@ var _ = Describe("CheckForNewApps", func() {
 		go discovery.Start(ctx)
 
 		Eventually(fakeClient.NewAppStreamProviderCallCount).Should(Equal(2))
-		Eventually(fakeAppStreamProvider1.StartCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider2.StartCallCount).Should(Equal(1))
-		Eventually(fakeAppStreamProvider1.CloseCallCount).Should(Equal(1))
 
-		Consistently(fakeAppStreamProvider1.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider1.CloseCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider2.StartCallCount, 200*time.Millisecond).Should(Equal(1))
-		Consistently(fakeAppStreamProvider2.CloseCallCount, 200*time.Millisecond).Should(Equal(0))
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid":         guid,
+				"organisation": "orgnamenew",
+			})
+		}).ShouldNot(BeNil())
+
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid":         guid,
+				"organisation": "orgname",
+			})
+		}).Should(BeNil())
 	})
 
-	// It("updates an AppWatcher when an app changes size", func() {
-	// 	fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{
-	// 		{Guid: "33333333-3333-3333-3333-333333333333", Instances: 1, Name: "foo", State: "STARTED"},
-	// 	}, nil)
-	// 	fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{
-	// 		{Guid: "33333333-3333-3333-3333-333333333333", Instances: 2, Name: "foo", State: "STARTED"},
-	// 	}, nil)
+	It("updates an AppWatcher when an app changes size", func() {
+		fakeClient.ListAppsWithSpaceAndOrgReturnsOnCall(0, []cfclient.App{appFixture}, nil)
 
-	// 	e := exporter.New(fakeClient, fakeWatcherManager)
+		appWithTwoInstances := appFixture
+		appWithTwoInstances.Instances = 2
+		fakeClient.ListAppsWithSpaceAndOrgReturns([]cfclient.App{appWithTwoInstances}, nil)
 
-	// 	go e.Start(ctx, 100*time.Millisecond)
+		go discovery.Start(ctx)
 
-	// 	Eventually(fakeWatcherManager.UpdateAppInstancesCallCount).Should(Equal(1))
+		Eventually(fakeClient.NewAppStreamProviderCallCount).Should(Equal(1))
 
-	// 	app := fakeWatcherManager.UpdateAppInstancesArgsForCall(0)
-	// 	Expect(app.Guid).To(Equal("33333333-3333-3333-3333-333333333333"))
-	// 	Expect(app.Instances).To(Equal(2))
-	// })
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid":     guid,
+				"instance": "0",
+			})
+		}).ShouldNot(BeNil())
+
+		Eventually(func() *dto.Metric {
+			return findMetric(registry, map[string]string{
+				"guid":     guid,
+				"instance": "1",
+			})
+		}).ShouldNot(BeNil())
+	})
 })
