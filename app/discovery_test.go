@@ -66,7 +66,7 @@ func findMetric(registry *prometheus.Registry, labels map[string]string) *dto.Me
 	return nil
 }
 
-var _ = FDescribe("CheckForNewApps", func() {
+var _ = Describe("CheckForNewApps", func() {
 
 	var discovery *app.Discovery
 	var fakeClient *mocks.FakeClient
